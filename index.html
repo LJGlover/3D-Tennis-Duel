@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Tennis Duel (vs AI)</title>
+    <!-- Load Tailwind CSS and Three.js -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        :root {
+            --court-color: #559c55; /* Tennis court green */
+            --racket1-color: #3b82f6; /* Blue for Player 1 */
+            --racket2-color: #ef4444; /* Red for Player 2 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #1f2937;
+            padding: 1rem;
+        }
+        #game-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            aspect-ratio: 4/3; /* Maintain aspect ratio */
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <!-- Main Application Container -->
+    <div id="app" class="w-full max-w-4xl mx-auto p-6 bg-gray-800 rounded-xl shadow-2xl">
+        <h1 class="text-4xl font-bold text-white text-center mb-6">3D Tennis Duel (vs AI)</h1>
+
+        <!-- Scoreboard and Controls -->
+        <div class="flex justify-between items-center text-white mb-4 p-3 bg-gray-700 rounded-lg shadow-inner">
+            <p class="text-xl font-medium text-blue-400">P1 (Human): <span id="score1" class="font-extrabold">0 | Love</span></p>
+            <p class="text-xl font-medium text-red-400">P2 (AI): <span id="score2" class="font-extrabold">0 | Love</span></p>
+            
+            <div class="flex space-x-3">
+                <button 
+                    id="stop-button"
+                    class="px-4 py-2 bg-gray-500 hover:bg-gray-600 transition duration-150 rounded-lg shadow-xl font-bold text-white transform hover:scale-105"
+                    onclick="endGame()"
+                >
+                    Stop Game
+                </button>
+                <button 
+                    id="start-button"
+                    class="px-4 py-2 bg-pink-500 hover:bg-pink-600 transition duration-150 rounded-lg shadow-xl font-bold text-white transform hover:scale-105"
+                    onclick="resetGame()"
+                >
+                    Start / Reset
+                </button>
+            </div>
+        </div>
+        
+        <!-- Game Area / Three.js Container -->
+        <div id="game-container">
+            <canvas id="gameCanvas"></canvas>
+            <!-- Message Box (DOM overlay) -->
+            <div id="message-box" class="absolute inset-0 flex items-center justify-center bg-gray-800 bg-opacity-70 text-white text-3xl font-bold rounded-lg transition-opacity duration-500 z-20">
+                Click Start / Reset to Play!
+            </div>
+        </div>
+        
+        <p class="text-center text-sm text-gray-400 mt-4">
+            Player 1 (Bottom, Blue): **Fully controlled by Mouse/Touchpad.** Move cursor left/right for X-axis, up/down for Z-axis. Player 2 (Top, Red): AI controlled.
+        </p>
+
+    </div>
+
+    <script>
+        // --- THREE.JS INITIALIZATION ---
+        
+        let scene, camera, renderer;
+        let court, net, ball, paddle1, paddle2;
+        let container = document.getElementById('game-container');
+        let canvas = document.getElementById('gameCanvas');
+
+        // --- GAME CONSTANTS ---
+        const COURT_WIDTH = 40;
+        const COURT_HEIGHT = 80;
+        const PADDLE_WIDTH = 8;
+        const PADDLE_HEIGHT = 1;
+        const PADDLE_DEPTH = 1;
+        const BALL_RADIUS = 1;
+        const MAX_SPEED = 1.2;
+        const INITIAL_SPEED = 0.5;
+        const SPEED_INCREMENT = 0.05;
+        const AI_SPEED = 0.4; // AI movement speed
+        
+        const AI_MISTAKE_CHANCE = 0.08; // 8% chance of AI aiming incorrectly
+        const AI_MISTAKE_RANGE = 15; // Max horizontal error for AI mistake
+
+        // P1 RACKET Z-AXIS MOVEMENT
+        const PADDLE_Z_MIN = COURT_HEIGHT / 2 - 15; // Z=25 (Closest to net/Furthest forward)
+        const PADDLE_Z_MAX = COURT_HEIGHT / 2 - 5;  // Z=35 (Closest to baseline/Furthest back)
+        const PADDLE_INITIAL_Z = (PADDLE_Z_MIN + PADDLE_Z_MAX) / 2; // Z=30 (Mid-range)
+        // PADDLE_Z_SPEED is no longer needed as movement is calculated by position interpolation.
+
+        const AI_PADDLE_Z = -(COURT_HEIGHT / 2 - 10); // AI remains fixed at Z=-30
+        
+        // --- GAME STATE VARIABLES ---
+        let point1 = 0;
+        let point2 = 0;
+        let games1 = 0;
+        let games2 = 0;
+        let isGameRunning = false;
+        let ballVelocity = new THREE.Vector3(0, 0, 0);
+
+        // Player 1 Mouse/Touch target tracking
+        let targetX = 0;
+        let targetZ = PADDLE_INITIAL_Z; // New target Z variable
+
+        // --- SCORING & UI ELEMENTS ---
+        const TENNIS_SCORES = ["Love", "15", "30", "40"];
+        const scoreDisplay1 = document.getElementById('score1');
+        const scoreDisplay2 = document.getElementById('score2');
+        const messageBox = document.getElementById('message-box');
+        
+        // --- UTILITY FUNCTIONS ---
+
+        function displayMessage(text, colorClass = 'bg-gray-800 bg-opacity-70', hide = true) {
+            messageBox.textContent = text;
+            messageBox.className = `absolute inset-0 flex items-center justify-center text-white text-3xl font-bold rounded-lg transition-opacity duration-500 z-20 ${colorClass}`;
+            messageBox.classList.remove('opacity-0');
+            
+            if (hide) {
+                setTimeout(() => {
+                    messageBox.classList.add('opacity-0');
+                }, 1500);
+            }
+        }
+
+        function getTennisScore(p1, p2) {
+            if (p1 >= 3 && p2 >= 3) {
+                if (p1 === p2) return "Deuce";
+                if (p1 === p2 + 1) return "Ad";
+                if (p2 === p1 + 1) return "Ad";
+            }
+            if (p1 > 3) return "40";
+            return TENNIS_SCORES[p1];
+        }
+
+        function updateScoreboard() {
+            let p1ScoreText = `${games1} | ${getTennisScore(point1, point2)}`;
+            let p2ScoreText = `${games2} | ${getTennisScore(point2, point1)}`;
+            
+            if (point1 >= 3 && point2 >= 3) {
+                 if (point1 === point2) {
+                     p1ScoreText = `${games1} | Deuce`;
+                     p2ScoreText = `${games2} | Deuce`;
+                 } else if (point1 === point2 + 1) {
+                     p1ScoreText = `${games1} | Ad`;
+                     p2ScoreText = `${games2} | 40`;
+                 } else if (point2 === point1 + 1) {
+                     p1ScoreText = `${games1} | 40`;
+                     p2ScoreText = `${games2} | Ad`;
+                 }
+            }
+
+            if (scoreDisplay1) scoreDisplay1.textContent = p1ScoreText;
+            if (scoreDisplay2) scoreDisplay2.textContent = p2ScoreText;
+        }
+
+        // --- GAME SETUP ---
+
+        function initThreeJS() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x303030); // Darker background outside court
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
+            // Position camera to view the court from Player 1's side (bottom)
+            camera.position.set(0, 20, PADDLE_Z_MAX + 15);
+            camera.rotation.x = -Math.PI / 4; // Look down slightly
+            
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(0, 50, 50);
+            scene.add(directionalLight);
+
+            // Court (Green Floor)
+            const courtGeometry = new THREE.PlaneGeometry(COURT_WIDTH, COURT_HEIGHT);
+            const courtMaterial = new THREE.MeshLambertMaterial({ color: 0x559c55 });
+            court = new THREE.Mesh(courtGeometry, courtMaterial);
+            court.rotation.x = -Math.PI / 2; // Rotate flat
+            court.position.y = 0;
+            court.position.z = 0;
+            scene.add(court);
+
+            // Net (3D Mesh)
+            const netGeometry = new THREE.BoxGeometry(COURT_WIDTH, 5, 0.1); // Wide, relatively high, very thin
+            const netMaterial = new THREE.MeshBasicMaterial({ color: 0xf0f0f0, transparent: true, opacity: 0.8 });
+            net = new THREE.Mesh(netGeometry, netMaterial);
+            net.position.y = 2.5; // Half of 5 units high
+            net.position.z = 0;
+            scene.add(net);
+
+            // Ball
+            const ballGeometry = new THREE.SphereGeometry(BALL_RADIUS, 16, 16);
+            const ballMaterial = new THREE.MeshLambertMaterial({ color: 0xe5f626 });
+            ball = new THREE.Mesh(ballGeometry, ballMaterial);
+            scene.add(ball);
+
+            // Paddle 1 (Player, Blue)
+            const paddleGeometry = new THREE.BoxGeometry(PADDLE_WIDTH, PADDLE_HEIGHT, PADDLE_DEPTH);
+            const paddle1Material = new THREE.MeshLambertMaterial({ color: 0x3b82f6 });
+            paddle1 = new THREE.Mesh(paddleGeometry, paddle1Material);
+            paddle1.position.z = PADDLE_INITIAL_Z; // Use calculated initial Z
+            paddle1.position.y = PADDLE_HEIGHT / 2;
+            scene.add(paddle1);
+
+            // Paddle 2 (AI, Red)
+            const paddle2Material = new THREE.MeshLambertMaterial({ color: 0xef4444 });
+            paddle2 = new THREE.Mesh(paddleGeometry, paddle2Material);
+            paddle2.position.z = AI_PADDLE_Z; // AI remains fixed in Z
+            paddle2.position.y = PADDLE_HEIGHT / 2;
+            scene.add(paddle2);
+            
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function onWindowResize() {
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(width, height);
+        }
+
+        // --- RACKET MOVEMENT (MOUSE/TOUCH CONTROL) ---
+
+        function updateTargetPos(clientX, clientY) {
+            if (!isGameRunning) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const width = rect.width;
+            const height = rect.height;
+
+            // --- X-Axis (Side-to-Side) ---
+            // Normalized X coordinate from -1 (left) to 1 (right)
+            const normalizedX = (clientX - rect.left) / width * 2 - 1;
+            targetX = normalizedX * (COURT_WIDTH / 2);
+            
+            // Clamp targetX to stay within court boundaries
+            const halfPaddle = PADDLE_WIDTH / 2;
+            targetX = Math.max(-COURT_WIDTH / 2 + halfPaddle, Math.min(COURT_WIDTH / 2 - halfPaddle, targetX));
+
+            // --- Z-Axis (Forward-Backward) ---
+            // Normalized Y coordinate from 0 (top of canvas/near net) to 1 (bottom of canvas/near baseline)
+            let normalizedY = (clientY - rect.top) / height;
+
+            // Map normalizedY (0 to 1) to the Z range [PADDLE_Z_MIN, PADDLE_Z_MAX]
+            // 0 (top) maps to PADDLE_Z_MIN (forward)
+            // 1 (bottom) maps to PADDLE_Z_MAX (backward)
+            targetZ = PADDLE_Z_MIN + normalizedY * (PADDLE_Z_MAX - PADDLE_Z_MIN);
+            
+            // Ensure targetZ is clamped
+            targetZ = Math.max(PADDLE_Z_MIN, Math.min(PADDLE_Z_MAX, targetZ));
+        }
+
+        // Mouse listeners
+        container.addEventListener('mousemove', (event) => updateTargetPos(event.clientX, event.clientY));
+        
+        // Touch listeners
+        container.addEventListener('touchmove', (event) => {
+            if (event.touches.length > 0) {
+                event.preventDefault(); // Prevent scrolling
+                updateTargetPos(event.touches[0].clientX, event.touches[0].clientY);
+            }
+        });
+        
+        function movePaddle1() {
+            // Interpolate position towards the mouse/touch target. 0.2 is the smoothing factor.
+            
+            // X-Movement (Mouse/Touch X)
+            paddle1.position.x += (targetX - paddle1.position.x) * 0.2;
+            
+            // Z-Movement (Mouse/Touch Y)
+            paddle1.position.z += (targetZ - paddle1.position.z) * 0.2;
+        }
+
+
+        // AI Movement (Paddle 2)
+        function movePaddle2AI() {
+            if (ballVelocity.z > 0) return; // Only move when ball is approaching
+            
+            let targetXAI = ball.position.x;
+            
+            // *** AI Difficulty Adjustment: Introduce a chance for mistake ***
+            if (Math.random() < AI_MISTAKE_CHANCE) {
+                // AI makes a mistake: aim far away from the ball
+                // Add a large random offset to the target position
+                targetXAI += (Math.random() - 0.5) * AI_MISTAKE_RANGE; 
+            }
+
+            const halfPaddle = PADDLE_WIDTH / 2;
+            
+            // Calculate movement amount
+            let deltaX = targetXAI - paddle2.position.x;
+            let moveAmount = Math.min(Math.abs(deltaX), AI_SPEED);
+
+            if (deltaX > 0) { // Move Right
+                paddle2.position.x += moveAmount;
+            } else if (deltaX < 0) { // Move Left
+                paddle2.position.x -= moveAmount;
+            }
+            
+            // Clamp AI position to stay within court boundaries
+            paddle2.position.x = Math.max(-COURT_WIDTH / 2 + halfPaddle, Math.min(COURT_WIDTH / 2 - halfPaddle, paddle2.position.x));
+        }
+
+        // --- GAME PHYSICS & COLLISION ---
+
+        function checkPaddleCollision(paddle) {
+            const isP1 = paddle === paddle1;
+            
+            // Racket Z bounds
+            const paddleZMin = paddle.position.z - PADDLE_DEPTH / 2;
+            const paddleZMax = paddle.position.z + PADDLE_DEPTH / 2;
+
+            // Ball Z bounds
+            const ballZMin = ball.position.z - BALL_RADIUS;
+            const ballZMax = ball.position.z + BALL_RADIUS;
+            
+            // 1. Check Z overlap
+            const zOverlap = ballZMax > paddleZMin && ballZMin < paddleZMax;
+
+            // 2. Check X overlap
+            const xOverlap = ball.position.x + BALL_RADIUS > paddle.position.x - PADDLE_WIDTH / 2 &&
+                             ball.position.x - BALL_RADIUS < paddle.position.x + PADDLE_WIDTH / 2;
+            
+            // 3. Check approach direction
+            // P1 collision check only if ball is traveling towards positive Z
+            // P2 collision check only if ball is traveling towards negative Z
+            const approaching = (isP1 && ballVelocity.z > 0) || (!isP1 && ballVelocity.z < 0);
+
+            if (xOverlap && zOverlap && approaching) {
+                
+                // Push ball slightly out of collision zone (to prevent double hits)
+                ball.position.z = isP1 ? paddleZMin - BALL_RADIUS - 0.01 : paddleZMax + BALL_RADIUS + 0.01;
+
+                // 1. Reverse Z direction
+                ballVelocity.z *= -1; 
+
+                // 2. Calculate horizontal angle change
+                const ballCenter = ball.position.x;
+                const paddleCenter = paddle.position.x;
+                
+                // Normalized hit offset: -1 (left edge) to 1 (right edge)
+                const normalizedOffset = (ballCenter - paddleCenter) / (PADDLE_WIDTH / 2);
+                
+                // 3. Update X velocity
+                let newDX = normalizedOffset * Math.abs(ballVelocity.z) * 0.75; 
+                ballVelocity.x = newDX;
+
+                // 4. Increase total speed slightly (capped)
+                const currentSpeedSq = ballVelocity.x * ballVelocity.x + ballVelocity.z * ballVelocity.z;
+                const newSpeedSq = Math.min(MAX_SPEED * MAX_SPEED, currentSpeedSq + SPEED_INCREMENT * SPEED_INCREMENT);
+                
+                // Recalculate Z component to maintain new total speed
+                const newSpeed = Math.sqrt(newSpeedSq);
+                ballVelocity.z = ballVelocity.z / Math.abs(ballVelocity.z) * Math.sqrt(newSpeedSq - ballVelocity.x * ballVelocity.x);
+                
+                displayMessage('Volley!', isP1 ? 'bg-blue-600 bg-opacity-70' : 'bg-red-600 bg-opacity-70', true);
+                return true;
+            }
+            return false;
+        }
+
+        function updatePhysics() {
+            // Update ball position
+            ball.position.x += ballVelocity.x;
+            ball.position.z += ballVelocity.z;
+
+            // 1. Wall Collision (X-axis)
+            if (ball.position.x + BALL_RADIUS > COURT_WIDTH / 2 || ball.position.x - BALL_RADIUS < -COURT_WIDTH / 2) {
+                ballVelocity.x *= -1;
+                // Clamp position
+                ball.position.x = Math.max(-COURT_WIDTH / 2 + BALL_RADIUS, Math.min(COURT_WIDTH / 2 - BALL_RADIUS, ball.position.x));
+            }
+            
+            // 2. Net Collision (Z-axis is 0)
+            if (Math.abs(ball.position.z) < BALL_RADIUS) { 
+                if (ball.position.y < net.position.y + 2.5) { 
+                    // Simple net hit: slight horizontal slow down
+                    ballVelocity.x *= 0.8;
+                }
+            }
+
+
+            // 3. Paddle Collision
+            if (checkPaddleCollision(paddle1)) return;
+            if (checkPaddleCollision(paddle2)) return;
+
+            // 4. Scoring (Ball hits baseline Z)
+            
+            // Missed by P2 (Hits far baseline Z < -COURT_HEIGHT/2)
+            if (ball.position.z < -COURT_HEIGHT / 2) {
+                point1++;
+                displayMessage('P1 Point!', 'bg-blue-700 bg-opacity-80', true);
+                checkGameWin();
+                return;
+            }
+
+            // Missed by P1 (Hits near baseline Z > COURT_HEIGHT/2)
+            if (ball.position.z > COURT_HEIGHT / 2) {
+                point2++;
+                displayMessage('P2 Point!', 'bg-red-700 bg-opacity-80', true);
+                checkGameWin();
+                return;
+            }
+        }
+
+        // --- GAME FLOW ---
+        
+        function checkGameWin() {
+            let winner = null;
+            if (point1 >= 4 && point1 >= point2 + 2) {
+                winner = 1;
+            } else if (point2 >= 4 && point2 >= point1 + 2) {
+                winner = 2;
+            }
+
+            if (winner) {
+                if (winner === 1) {
+                    games1++;
+                    displayMessage(`Game P1! P1 Games: ${games1}`, 'bg-blue-700 bg-opacity-80', false);
+                } else {
+                    games2++;
+                    displayMessage(`Game P2! P2 Games: ${games2}`, 'bg-red-700 bg-opacity-80', false);
+                }
+                
+                point1 = 0;
+                point2 = 0;
+                updateScoreboard();
+
+                let serverToP1 = (games1 + games2) % 2 === 0;
+                
+                isGameRunning = false;
+                setTimeout(() => resetBallPositionAndServe(serverToP1), 3000);
+            } else {
+                updateScoreboard();
+                
+                isGameRunning = false;
+                // If P2 scored the point, P1 serves next (serve to P1)
+                let serveToP1 = (point1 > point2);
+                setTimeout(() => resetBallPositionAndServe(serveToP1), 1000);
+            }
+        }
+
+        function endGame() {
+            if (!isGameRunning) return;
+
+            isGameRunning = false;
+            
+            // Stop the ball movement and hide it
+            ball.position.set(0, -100, 0); 
+            ballVelocity.set(0, 0, 0);
+
+            // Display an "Game Ended" message
+            displayMessage('Game Stopped. Click Start / Reset to begin a new match.', 'bg-yellow-600 bg-opacity-80', false);
+        }
+
+        function resetBallPositionAndServe(serveToPlayer1) {
+            // Center the ball
+            ball.position.set(0, BALL_RADIUS, 0); 
+            
+            // Set initial speed/direction towards the served player
+            const initialDX = (Math.random() * 0.5 - 0.25) * INITIAL_SPEED; // Slight random angle
+            const initialDZ = serveToPlayer1 ? INITIAL_SPEED : -INITIAL_SPEED;
+
+            ballVelocity.set(initialDX, 0, initialDZ);
+
+            startGame();
+        }
+
+        function startGame() {
+            if (isGameRunning) return;
+            isGameRunning = true;
+            messageBox.classList.add('opacity-0');
+        }
+
+        function resetGame() {
+            // Stop game loop
+            isGameRunning = false;
+
+            // Reset all scores
+            point1 = 0;
+            point2 = 0;
+            games1 = 0;
+            games2 = 0;
+            updateScoreboard();
+            
+            // Reset paddles to center
+            paddle1.position.x = 0;
+            paddle1.position.z = PADDLE_INITIAL_Z; // Reset P1 Z position
+            paddle2.position.x = 0;
+
+            // Reset mouse target position
+            targetX = 0;
+            targetZ = PADDLE_INITIAL_Z;
+
+
+            // Hide the ball briefly during reset
+            ball.position.set(0, -100, 0);
+
+            // Start the message and subsequent serve
+            displayMessage('Game Reset. Ready! Serving to P1...', 'bg-gray-800 bg-opacity-70', false);
+            setTimeout(() => resetBallPositionAndServe(true), 1500); 
+        }
+        
+        // --- ANIMATION LOOP ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isGameRunning) {
+                movePaddle1();
+                movePaddle2AI();
+                updatePhysics();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- INITIALIZATION ---
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            initThreeJS();
+            resetGame();
+            animate(); // Start the animation loop
+        });
+        
+    </script>
+</body>
+</html>
